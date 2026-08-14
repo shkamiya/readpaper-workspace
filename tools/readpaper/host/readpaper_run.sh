@@ -41,10 +41,15 @@ cd "$PROJECT_DIR" || exit 1
 # placeholder) rewrites ONLY the assignment line above, never this comparison.
 BAKED_PATH="__READPAPER_PATH__"
 if [ "$BAKED_PATH" = "__READPAPER""_PATH__" ] || [ -z "$BAKED_PATH" ]; then
-  # Run straight from the repo (not deployed): no bake happened, so guess generically.
-  BAKED_PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # Run straight from the repo (not deployed), i.e. by hand from a normal shell. No bake
+  # happened, so the inherited PATH is the better guess and goes FIRST — appending the
+  # generic guess ahead of it would shadow, say, a pyenv python3 that has pillow with a
+  # homebrew python3 that does not.
+  export PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+else
+  # Deployed under Chrome: the inherited environment is bare, so the baked PATH leads.
+  export PATH="$BAKED_PATH:$PATH"
 fi
-export PATH="$BAKED_PATH:$PATH"
 
 # ------------------------------------------------------------------- agent backend
 # Which coding agent writes the explainer: "claude" (Claude Code) or "codex" (Codex CLI).

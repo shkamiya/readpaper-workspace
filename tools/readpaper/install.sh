@@ -74,7 +74,13 @@ if [ -z "$PY_BIN" ]; then
 fi
 
 BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-BAKED_PATH="$(dirname "$AGENT_BIN"):$(dirname "$PY_BIN"):$BREW_PREFIX/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# ORDER MATTERS: python3's directory goes FIRST. The dependency check below verifies
+# pillow/numpy against exactly $PY_BIN, so $PY_BIN must be the python3 the worker
+# actually runs. Putting the agent's directory first breaks that whenever the agent
+# lives somewhere that also ships a python3 — e.g. codex in /opt/homebrew/bin shadows
+# a pyenv python3 that has pillow, and figure extraction then dies on `import PIL`
+# while install.sh reported everything fine (measured 2026-08-14).
+BAKED_PATH="$(dirname "$PY_BIN"):$(dirname "$AGENT_BIN"):$BREW_PREFIX/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 /usr/bin/sed -i '' "s|__READPAPER_PATH__|$BAKED_PATH|g" "$DEPLOY/readpaper_run.sh"
 
 # The worker sources this to learn which backend to drive. Kept as a separate file (not
