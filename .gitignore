@@ -1,0 +1,30 @@
+# This repo distributes the *skeleton* of the paper-reading workspace — the readpaper
+# ("DP") tooling, the house rules, and the pinned explainer skill. It deliberately does
+# NOT distribute content: downloaded papers, generated explainers, logs, or personal
+# notes. A clone is an empty workspace that fills up locally.
+
+# --- generated / downloaded content (huge: papers/ ~329MB, html-expl/ ~120MB) ---
+papers/*
+!papers/.gitkeep
+html-expl/*
+!html-expl/.gitkeep
+logs/*
+!logs/.gitkeep
+images-from-papers/
+
+# --- personal working notes, not part of the tool ---
+notes/
+reports/
+scratch-*/
+20260615-readpaper-oneclick-plan.md
+
+# --- icon design leftovers at the repo root (the real generator lives in
+#     tools/readpaper/make_extension_icons.py) ---
+make_icons.py
+icon_candidates.png
+icon_helv_preview.png
+
+# --- junk ---
+.DS_Store
+__pycache__/
+*.pyc

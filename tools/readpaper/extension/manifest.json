@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "readpaper — one-click explain",
+  "version": "0.2.0",
+  "description": "One-click: find the PDF on a paper page (arXiv, OpenReview, PMLR, JMLR, ACL, NeurIPS, CVF), download it and run claude explain-via-html headless.",
+  "permissions": ["nativeMessaging", "tabs", "scripting", "activeTab"],
+  "host_permissions": [
+    "https://arxiv.org/*",
+    "https://openreview.net/*",
+    "https://proceedings.mlr.press/*",
+    "https://raw.githubusercontent.com/mlresearch/*",
+    "https://jmlr.org/*",
+    "https://www.jmlr.org/*",
+    "https://aclanthology.org/*",
+    "https://proceedings.neurips.cc/*",
+    "https://papers.nips.cc/*",
+    "https://openaccess.thecvf.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "readpaper: explain this paper",
+    "default_icon": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  },
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+}
