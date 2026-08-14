@@ -133,6 +133,13 @@ plugin install at all. See `skills/README.md`.
 - Concurrent clicks launch concurrent headless runs (no queue in v0.1).
 - **A landing page that needs JS to show its PDF link** only works through the
   extension (the host's server-side GET sees the unrendered HTML).
+- **No apostrophes inside the `<<'PYEOF'` heredocs in `readpaper_run.sh`.** They sit inside
+  `$( ... )` command substitutions, and bash keeps tracking quotes through the heredoc body
+  there, so one unpaired `'` — even inside a Python comment — breaks the whole script with
+  `unexpected EOF while looking for matching`. Not hypothetical: writing Claude+`'`+s in a
+  comment did exactly this. Always run `bash -n tools/readpaper/host/readpaper_run.sh`
+  after editing, and note that the failure would otherwise first surface inside a detached
+  Chrome-spawned worker.
 - **Editing the extension requires a manual reload** in `chrome://extensions`
   (unpacked). Editing `host/` requires re-running `install.sh` (copy-based deploy).
 

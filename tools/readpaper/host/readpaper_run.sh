@@ -272,7 +272,7 @@ echo "[readpaper] codex exit=${PIPESTATUS[0]}"
 # same way as on the claude path: did this run produce a new html (START_EPOCH check)?
 CODEX_SUMMARY="$(python3 - "$CODEX_JSONL" <<'PYEOF'
 import json, sys
-sid, ctx, last_msg, errors = "", 0, "", 0
+sid, inp, cached, out, last_msg, errors = "", 0, 0, 0, "", 0
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     line = line.strip()
     if not line.startswith("{"):
@@ -285,9 +285,20 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if t == "thread.started" and not sid:
         sid = d.get("thread_id") or ""
     elif t == "turn.completed":
+        # NOTE ON SEMANTICS (measured 2026-08-14 on a full explainer run): codex emits ONE
+        # turn.completed for the whole `codex exec`, and its usage is CUMULATIVE over every
+        # model request in that turn - NOT the final context size, which is what the
+        # claude backend reads out of its own .usage. Also `cached_input_tokens` is a
+        # SUBSET of `input_tokens` (6,001,192 input of which 5,808,896 cached), so adding
+        # the two double-counts. Hence: report input/cached/output as-is, never as
+        # "context".
+        # (Keep apostrophes out of this heredoc. It sits inside $( ... ), where bash keeps
+        # tracking quotes through the heredoc body, so a single unpaired apostrophe
+        # anywhere in here breaks the whole script with "unexpected EOF".)
         u = d.get("usage") or {}
-        ctx = (u.get("input_tokens", 0) + u.get("cached_input_tokens", 0)
-               + u.get("cache_write_input_tokens", 0))
+        inp = u.get("input_tokens", 0)
+        cached = u.get("cached_input_tokens", 0)
+        out = u.get("output_tokens", 0)
     elif t == "item.completed":
         it = d.get("item") or {}
         if it.get("type") == "agent_message":
@@ -295,21 +306,21 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         elif it.get("type") == "error":
             errors += 1
 print(sid)
-print(ctx)
+print("%d %d %d" % (inp, cached, out))
 print(errors)
 print(" ".join(str(last_msg)[:300].split()))
 PYEOF
 )"
 SID="$(printf '%s' "$CODEX_SUMMARY" | sed -n 1p)"
-CTX="$(printf '%s' "$CODEX_SUMMARY" | sed -n 2p)"
+CODEX_USAGE="$(printf '%s' "$CODEX_SUMMARY" | sed -n 2p)"
 CODEX_ERRS="$(printf '%s' "$CODEX_SUMMARY" | sed -n 3p)"
 echo "[readpaper] run agent_message(head)=$(printf '%s' "$CODEX_SUMMARY" | sed -n 4p)"
 echo "[readpaper] run error_events=${CODEX_ERRS:-0} (non-fatal; see $CODEX_JSONL)"
 if [ -z "$SID" ]; then
   echo "[readpaper] WARN could not recover thread_id from $CODEX_JSONL -> session id will be blank"
 fi
-echo "[readpaper] session_id=$SID  (resume: codex exec resume $SID)"
-echo "[readpaper] context tokens ~= ${CTX:-0}"
+echo "[readpaper] session_id=$SID  (resume: codex exec resume --skip-git-repo-check $SID)"
+echo "[readpaper] cumulative tokens over the run (input cached output) = ${CODEX_USAGE:-0 0 0}"
 echo "[readpaper] codex backend: skip pre-compact (no headless /compact equivalent)"
 
 else
