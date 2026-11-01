@@ -19,7 +19,16 @@ Claude Code 用の `CLAUDE.md` と同じ内容を、Codex の CLI 語彙に合�
 - **テンソル・ベクトルは shape を明記する。** 例: 入力 $X \in \mathbb{R}^{B \times T \times d}$（$B$ = バッチサイズ、$T$ = 系列長、$d$ = 埋め込み次元）。
 - **「丁寧に・詳しく」を最優先。** 1〜2 行で済ませない。なぜその式になるのか、各項が何をしているのか、どの操作がどの次元に効くのかまで噛み砕く。読者はその論文を初見と仮定する。
 - **設定・ハイパラは具体値とともに。** 学習率・バッチサイズ・最適化器・スケジュール等は論文記載の具体値を表で示し、式中の記号と対応づける。
-- **数式のレンダリング。** HTML 内の数式は KaTeX または MathJax を CDN 1 本で読み込んでレンダリングする（`explain-via-html` の自己完結方針は維持しつつ、数式用 CDN の使用のみ許可する）。インライン数式・ブロック数式を適切に使い分ける。
+- **数式のレンダリング。** HTML 内の数式は KaTeX または MathJax を CDN 1 本で読み込んでレンダリングする（`explain-via-html` の自己完結方針は維持しつつ、数式用 CDN の使用のみ許可する）。**既定は KaTeX**（MathJax はデフォルトでインライン `$ … $` を読まないぶん事故りやすい）。インライン数式・ブロック数式を適切に使い分ける。
+- **数式の中に生の `<` を書かない。最重要。** `<` の直後が英字・`/`・`!`・`?` のとき、ブラウザの HTML トークナイザはそれを**開始タグ**として読む。KaTeX が動く前の段階で起きるので、数式どころか**周囲の本文ごとタグの属性に吸い込まれて画面から消える**。
+  - 例: `<li>$c_{<t} := (c_1,\dots,c_{t-1})$: 先頭 $t-1$ 個の …</li>` と書くと `<t}` が開始タグ名 `t}` になり、`:= (c_1,\dots,c_{t-1})$: 先頭 $t-1$ 個の` が消える（headless Chrome の DOM に `</t}$>` `</t};x)>` という要素が実在するのを 2026-08-16 に確認）。
+  - **正しい書き方**: `$c_{&lt;t}$` あるいは `$c_{\lt t}$`。`&lt;` はブラウザがテキストノードに戻してから KaTeX に渡るので TeX の意味は変わらない。
+  - `x_{<t}` / `c_{<t}` / `a_{<i}` は言語モデル系論文の標準記法なので**必ず踏む**。`$a < b$`（`<` の次が空白）や `$\rho(A)<1$`（次が数字）は無害なのでそのままでよい。
+- **KaTeX が実装していない LaTeX を使わない。** 使うと生の TeX ソースがそのまま出るか赤字になる。代表例と代替:
+  `\textsc` → `\mathrm` / `\text`、`\begin{psmallmatrix}` → `\left(\begin{smallmatrix}…\end{smallmatrix}\right)`、
+  `\begin{align}` → `\begin{aligned}`、`\begin{eqnarray}` → `\begin{aligned}`、`\bm` → `\boldsymbol`、
+  `\mathds` → `\mathbb`、`\nicefrac` → `\tfrac`、`\mbox` → `\text`、`\eqref` / `\label` → 削除。
+- **本文にリテラルの `$`（金額・シェルプロンプト等）を書かない。** `\$` は**エスケープにならない**。KaTeX の auto-render は TeX を解釈する前に生の `$` で本文を切るので、`$\$2$` は 2 個目の `$` で切れて本体 `\` を KaTeX に渡し、パースエラーになる。`2 USD` のように**記号を使わない言い回しに書き換える**。
 - **本文の数式デリミタは `$$`／`$` で書く。** ブロック数式 = `$$ … $$`、インライン = `$ … $`。本文で `\[ … \]`／`\( … \)` を**使わない**。理由: KaTeX `renderMathInElement` のデフォルト設定は `$$`/`$` しか登録せず、`\[ … \]` は**リテラル文字列のまま表示**されてしまう（実際に過去ファイルで多発した）。
 - **KaTeX 設定には保険として4種すべてのデリミタを登録する。** 生成する `renderMathInElement(document.body, {…})` の `delimiters` には、`$$`(display) / `$`(inline) に加えて `\[`(display) / `\(`(inline) も必ず入れる。これでうっかり `\[…\]` を書いてもレンダリングされる。正準ブロック:
   ```js
@@ -39,6 +48,20 @@ Claude Code 用の `CLAUDE.md` と同じ内容を、Codex の CLI 語彙に合�
   ```
   を `</style>` 直前に必ず入れる（図ダイアグラムの中央寄せは `figure svg` 側で維持される）。KaTeX はインライン数式を `<span>` で出すため影響を受けないが、この上書きを入れておいても無害。
 
+## 1.4. 書き終えたら必ず `check_html.py` を通す
+
+上のルールは「守れ」と書くだけでは守り切れない（2026-08-16 の全数監査で 103 本中 13 本に数式破損が残っていた）ので、
+**機械検査を必ず 1 回通してから完了とする**。
+
+```bash
+python3 tools/readpaper/host/check_html.py --fix html-expl/<生成したファイル>.html
+```
+
+- `--fix` が自動修復するもの: 数式中の生 `<` → `&lt;`、デリミタ登録の正準化、`throwOnError: false`、`<figcaption>` 内ブロック数式のインライン降格。
+- 自動修復**できない**もの（手で直す）: `katex-unsupported`（非対応マクロ）、`stray-dollar` / `escaped-dollar`（リテラルの `$`）、`swallowed-prose`（デリミタの閉じ忘れ）、`no-renderer`。
+- **findings が 0 になるまで直す。** 終了コードは findings が残っていれば 1。
+- readpaper worker（ワンクリック）は非公開の作業版をfinalize後に検査し、findingsが残ったら公開を中止して失敗通知を出す。対話生成でも**自分で 1 回叩いて確認すること**（Codex には Claude Code の Stop hook に相当する自動実行が無い）。
+
 ## 1.5. Codex セッション id をタイトル下に可視で出す
 
 担当した論文の Codex セッション id を、HTML コメントではなく **ヘッダの `<div class="meta">`（タイトル直下）に可視テキスト**として載せる。後から `codex exec resume <id>`（非対話）または `codex resume <id>`（対話 TUI）でその論文のセッションを再開できるようにするため。
@@ -46,11 +69,28 @@ Claude Code 用の `CLAUDE.md` と同じ内容を、Codex の CLI 語彙に合�
 - 例: `<br>codex session: <code>__AGENT_SESSION_ID__</code>`
 - **readpaper headless（Chrome ワンクリック）経由の生成**では、リテラル文字列 `__AGENT_SESSION_ID__` をそのまま `.meta` 内に書く。worker（`tools/readpaper/host/readpaper_run.sh`）が `finalize_html.py` を呼んで実セッション id へ置換する（プレースホルダを書き忘れた場合は `</h1>` 直後に可視行をフォールバック注入する）。
   - **id は事前採番できない。** `codex exec` には `--session-id` に相当するオプションが無いので、worker は `--json` 出力の最初のイベント `{"type":"thread.started","thread_id":"…"}` から**実行後に**回収する。置換は agent の実行が終わってから走るので、これで足りる。
-  - 置換は **python（`finalize_html.py`）で行う**。旧実装は bash の `ls -t html-expl/*.html | grep | head` で出力ファイルを発見していたが、Chrome 配下の macOS-TCC ゆらぎでこの glob が空を返し、置換・stamp が丸ごと skip されて**リテラルのプレースホルダが出荷される事故が多発した**。python の `os.scandir` は worker で FDA 安定なので確実に置換される。
+  - 置換は **python（`finalize_html.py`）で行う**。旧実装は bash の `ls -t html-expl/*.html | grep | head` で出力ファイルを発見していたが、Chrome 配下の macOS-TCC ゆらぎでこの glob が空を返し、置換・stamp が丸ごと skip されて**リテラルのプレースホルダが出荷される事故が多発した**。現在は明示された作業HTMLをPythonで直接読み、置換する。
   - 旧トークン `__CLAUDE_SESSION_ID__` も `finalize_html.py` が引き続き受け付ける（既存 HTML との互換のため）が、**新規生成では `__AGENT_SESSION_ID__` を使う**。
-- **対話セッションで手動生成**する場合は、プレースホルダを書いてはいけない（置換する worker がいないのでそのまま化けて出る）。**現在のセッション id を直接書く**。id が不明なら、プレースホルダではなく素直に「(interactive session)」等と書くか SK に確認する。
+  - **出力ファイルは実行開始前に固定する（2026-09-07）。** worker が
+    `logs/readpaper-work/<run-id>/html-expl/<name>.html` を編集先として明示する。
+    必ずそのファイルだけに生成し、別名を作らない。finalizer は `--html <exact-path>`
+    でそのファイルだけを処理し、本文のリンク・図パス・mtimeから探索しない。
+    公開用HTMLへのコピー・移動・一覧更新はworkerが検査後に行う。
+
+- **自分のセッション id を推測して書いてはいけない。**（旧ルールはこれを要求していて、それが破綻の原因だった。2026-08-16 の監査では対話生成 51 本のうち 15 本がどのログにも存在しない UUID を持っていた。）
+- **対話セッションで手動生成**する場合も、まず `__AGENT_SESSION_ID__` を書く。Codex には Claude Code の Stop hook に相当する自動置換が無いので、生成後に**自分で 1 回**次を叩いて実 id を埋める:
+  ```bash
+  python3 tools/readpaper/host/finalize_html.py --stamp html-expl/<file>.html <thread_id> codex
+  ```
+  `<thread_id>` は `codex` が表示する現在のスレッド id。取得できない場合は SK に確認する（プレースホルダのまま出荷しない）。
 
 ## 1.6. 図・表は「貼る前に検証してから貼る」
+
+**headless worker の作業先（2026-09-07）:** worker実行では、プロンプトに示された
+非公開のFIGDIRにmanifestと図がある。まずそこを確認し、HTML内の画像URLには
+指定された `figs/<dest>/<run-id>/<file>` を用いる。公開先の既存画像を書き換えない。
+以下の `html-expl/figs/<arxiv-id>/` は旧版と通常の対話生成の配置を指す。
+
 
 論文図・表は readpaper worker（`tools/readpaper/extract_figures.py`）が機械的に切り出して
 `html-expl/figs/<arxiv-id>/manifest.json` ＋ PNG に置く。**機械切り出しは外すことがある**ので、
@@ -106,3 +146,17 @@ Claude Code 用の `CLAUDE.md` と同じ内容を、Codex の CLI 語彙に合�
 - 回答も §1 と同じ方針で書く（数式中心・未定義語ゼロ・丁寧）。
 - 既存の Q&A がある HTML を更新する場合、過去分を消さず **日付つきの小見出しで追記** する（例: `### 2026-06-03`）。古い Q&A を上書きしない。
 - 質問が本文の記述で既に説明済みの内容に及ぶ場合は、本文の該当箇所へリンク（アンカー）を張り、Q&A 側では差分・補足のみを書く。
+
+## 3. `html-expl/meta/` は SK の欄。agent は読むだけで、編集しない
+
+`html-expl/meta/<stem>.json` には SK 自身が記事内カードから付けた **読書状態（読み中／読了）・
+理解度（ふんわり／だいたい／しっかり）・ひとことまとめ** が入っている（`tools/readpaper/host/meta_store.py`）。
+in-page chat の prompt にはこれが読み取り専用で添えられる（`ask_run.py`）。
+
+- **この欄は SK の言葉であることに価値がある。** agent が要約を書き足したり、理解度を「更新」したりしてはならない。
+  誤解に気づいたら Q&A や本文で指摘する。
+- **書き込み経路は `POST /api/meta` だけ。** JSON を直接編集しない。`_all.json` は保存のたびにサーバが再生成する。
+- 全件の書き出しは `python3 tools/readpaper/export_reading.py`（md 表）。設計は `notes/20260904-reading-marks-plan.md`。
+
+- **`html-expl/ink/<stem>.json` も同じ扱い（2026-09-07）。** SK が Apple Pencil で記事に書いた手書きストローク（`tools/readpaper/host/ink_store.py`、書き込みは `POST /api/ink` のみ）。agent は読まず、編集もしない。chat の prompt にも添えない。
+- **`html-expl/pos/<stem>.json` も同じ扱い（2026-09-09）。** SK が最後に読んでいた位置（しおり、`tools/readpaper/host/pos_store.py`、書き込みは `POST /api/pos` のみ、`pos_widget.js` が自動保存・自動復帰）。agent は読まず、編集もしない。chat の prompt にも添えない。

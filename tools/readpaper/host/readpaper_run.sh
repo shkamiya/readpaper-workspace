@@ -71,7 +71,6 @@ if [ -z "$AGENT" ]; then
 fi
 
 TS="$(date +%Y%m%d-%H%M%S)"
-START_EPOCH="$(date +%s)"
 mkdir -p logs papers
 LOG="logs/readpaper-${DEST}-${TS}.log"
 
@@ -91,16 +90,41 @@ echo "[readpaper] $(date) start  url=$PDF_URL  dest=$DEST  project=$PROJECT_DIR 
 # NEWEST html in html-expl/ (a different paper!) and the notification announced
 # that wrong title as "done" — which looked like "the button silently fails"
 # (observed repeatedly: 2605.07772 on 06-30/07-20/07-21, 2601.23236v2 on 07-17).
-# Matching is content-based (figs/<id>, papers/<id>, arXiv:<id>) with the version
-# suffix stripped, done in python (bash globs are TCC-flaky under Chrome).
+# Matching is content-based, with the version suffix stripped, done in python
+# (bash globs are TCC-flaky under Chrome). It must look ONLY at markers that say
+# "this html IS that paper's explainer":
+#   * figs/<id>/… and papers/<id>.pdf  — self-owned asset paths (the embedded
+#     figures and the finalize stamp <!-- source: papers/<id>.pdf … -->).
+#   * the paper id printed in the page header (<body> … first <h2>) — the legacy
+#     fallback for the ~26 pre-2026-07 explainers that embed no figures at all;
+#     they carry it as "arXiv:2402.07754" in a .kicker / .tag / .sub line.
+# It must NOT scan the whole body for "arxiv.org/abs/<id>" / "arXiv:<id>": every
+# explainer cites a dozen OTHER papers by exactly that form, in 先行研究 and Q&A
+# sections. That was the 2026-08-17 false-positive storm — clicking 2306.11167 or
+# 2509.23808 matched 20260814-long-distance-exploration-insight.html (it cites
+# both in its reference list) and the button answered "already exists" for papers
+# that had never been read.
 # Escape hatch for intentional regeneration: READPAPER_FORCE=1.
-if [ "${READPAPER_FORCE:-0}" != "1" ]; then
+EXISTING=""
+if [ -d "html-expl" ]; then
   EXISTING="$(python3 - "$DEST" <<'PYEOF'
 import os, re, sys
 dest = sys.argv[1]
-base = re.sub(r"v\d+$", "", dest)
-pats = [f"figs/{base}", f"papers/{base}", f"arxiv.org/abs/{base}",
-        f"arxiv.org/pdf/{base}", f"arXiv:{base}"]
+base = re.escape(re.sub(r"v\d+$", "", dest))
+ver = r"(?:v\d+)?"
+# Self-owned assets: figs/<id>/ (embedded crops) and papers/<id>.pdf (source stamp).
+asset = re.compile(r"(?:figs/" + base + ver + r"/|papers/" + base + ver + r"\.pdf)")
+# Legacy fallback, header-scoped only: "arXiv: 2605.24956v1" / "arXiv:2510.13117v3".
+ident = re.compile(r"(?:arXiv:?\s*|arxiv\.org/(?:abs|pdf)/)" + base + ver + r"\b")
+
+def header(s):
+    """<body> … first <h2>: title block only, before any 先行研究 / Q&A citation."""
+    i = s.find("<body")
+    i = 0 if i < 0 else i
+    j = s.find("<h2", i)
+    j = min(i + 4000, len(s)) if j < 0 else j
+    return s[i:j]
+
 best, best_m = None, -1.0
 try:
     for e in os.scandir("html-expl"):
@@ -110,17 +134,18 @@ try:
             s = open(e.path, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
-        if any(p in s for p in pats):
-            m = e.stat().st_mtime
-            if m > best_m:
-                best, best_m = e.path, m
+        hit = asset.search(s) or ident.search(header(s))
+        if hit:
+            mt = e.stat().st_mtime
+            if mt > best_m:
+                best, best_m = e.path, mt
 except OSError:
     pass
 if best:
     print(best)
 PYEOF
 )"
-  if [ -n "$EXISTING" ]; then
+  if [ -n "$EXISTING" ] && [ "${READPAPER_FORCE:-0}" != "1" ]; then
     ETITLE="$(python3 -c "import re,sys; m=re.search(r'<title>([^<]*)</title>', open(sys.argv[1],encoding='utf-8').read()); print(m.group(1) if m else '')" "$EXISTING" 2>/dev/null)"
     [ -n "$ETITLE" ] || ETITLE="$DEST"
     echo "[readpaper] explainer already exists: $EXISTING (skip; READPAPER_FORCE=1 to regenerate)"
@@ -130,6 +155,24 @@ PYEOF
     exit 0
   fi
 fi
+
+# Fix the output path and starting revision before downloading or starting AI.
+PUBLISH="$HOST_DIR/publish_html.py"
+[ -f "$PUBLISH" ] || PUBLISH="$PROJECT_DIR/tools/readpaper/host/publish_html.py"
+if ! WORK_DIR="$(python3 "$PUBLISH" prepare "$PROJECT_DIR" "$DEST")"; then
+  echo "[readpaper] ERROR could not prepare private output"
+  notify "✗ $DEST: could not prepare private output"
+  exit 1
+fi
+if ! WORK_PATHS="$(python3 "$PUBLISH" paths "$WORK_DIR")"; then
+  echo "[readpaper] ERROR could not load output paths; work=$WORK_DIR"
+  exit 1
+fi
+STAGE_HTML="$(printf '%s' "$WORK_PATHS" | sed -n 1p)"
+FIGDIR="$(printf '%s' "$WORK_PATHS" | sed -n 2p)"
+FIG_REL="$(printf '%s' "$WORK_PATHS" | sed -n 3p)"
+SLUG_FILE="$(printf '%s' "$WORK_PATHS" | sed -n 4p)"
+echo "[readpaper] private draft=$STAGE_HTML  work=$WORK_DIR"
 
 PDF="papers/${DEST}.pdf"
 if [ -f "$PDF" ]; then
@@ -176,9 +219,14 @@ fi
 # figure silently degrade to a hand-drawn inline SVG. The worker shell keeps FDA
 # reliably (its curl/python IO succeeds every run), so doing the pixel work here
 # decouples figure quality from Claude's flaky TCC state.
-FIGDIR="html-expl/figs/${DEST}"
 echo "[readpaper] extracting figures -> $FIGDIR"
-python3 "$HOST_DIR/extract_figures.py" "$PDF" "$FIGDIR" || echo "[readpaper] WARN figure extraction failed"
+EXTRACT="$HOST_DIR/extract_figures.py"
+[ -f "$EXTRACT" ] || EXTRACT="$PROJECT_DIR/tools/readpaper/extract_figures.py"
+if ! python3 "$EXTRACT" "$PDF" "$FIGDIR"; then
+  echo "[readpaper] ERROR figure extraction failed; private work kept: $WORK_DIR"
+  notify "✗ $DEST: figure extraction failed"
+  exit 1
+fi
 # Count via python: the bash glob here is TCC-flaky under Chrome and logged
 # "extracted 0" even when extract_figures had just written 5+ crops.
 NFIG="$(python3 -c "import os,sys
@@ -208,16 +256,24 @@ if [ ! -f "$SKILL_MD" ]; then
   exit 1
 fi
 
-PROMPT="まず ${SKILL_MD} を読み、その HTML explainer 規約に従うこと（marketplace plugin ではなく、この repo に pin されたファイルが正）。次に ${RULES_FILE} のハウスルールを読み、スキルと衝突する箇所ではハウスルール側を優先すること。その上で ${PDF} を読んで、ハウスルール（数式中心・未定義記号ゼロ・図表・核心概念の具体例補足・末尾 Q&A 枠）に従って html-expl/ に HTML explainer を生成して。
+PROMPT="まず ${SKILL_MD} を読み、その HTML explainer 規約に従うこと（marketplace plugin ではなく、この repo に pin されたファイルが正）。次に ${RULES_FILE} のハウスルールを読み、スキルと衝突する箇所ではハウスルール側を優先すること。その上で ${PDF} を読んで、ハウスルール（数式中心・未定義記号ゼロ・図表・核心概念の具体例補足・末尾 Q&A 枠）に従って ${STAGE_HTML} に HTML explainer を生成して。
 
-【図の扱い／最重要・検証してから貼る】worker が論文の図・表を既に切り出し済み。\`${FIGDIR}/manifest.json\`（各エントリ: label/num/page/file/clip/caption/low_conf/needs_review/reason）と PNG が置いてある。本文の該当箇所には、原則この manifest の実図を \`<img src=\"figs/${DEST}/<file>\" ...>\`（html-expl/ からの相対パス）で埋め込み、caption も併記せよ。**ただし機械切り出しは外すことがある。貼る前に必ず検証せよ:**
+【今回の出力先／必須】書き込むHTMLは上の絶対パス1本に固定する。公開先のhtml-expl/や他の論文を編集してはならない。作業HTMLと図は非公開の作業ディレクトリにある。相対画像URLは公開後の位置を基準に ${FIG_REL}/<file> と書くこと。作業ファイルの名称はworkerが決めているので、日付やタイトルから別名を作らないこと。代わりに、公開ファイル名用のスラッグ（論文内容を表す英小文字・ハイフン区切りの3〜6語。日付・arXiv id・拡張子は付けない。例: dissecting-hrm-mechanistic-study, recursive-scaling-masked-diffusion）を1行だけ ${SLUG_FILE} に書くこと。workerが公開時に YYYYMMDD-<スラッグ>.html として配置する。公開先への移動・コピー・一覧更新・ブラウザで開く処理はworkerが行うため実行しないこと。
+
+【図の扱い／最重要・検証してから貼る】worker が論文の図・表を既に切り出し済み。\`${FIGDIR}/manifest.json\`（各エントリ: label/num/page/file/clip/caption/low_conf/needs_review/reason）と PNG が置いてある。本文の該当箇所には、原則この manifest の実図を \`<img src=\"${FIG_REL}/<file>\" ...>\`（公開後のhtml-expl/からの相対パス。実際の画像確認は上のFIGDIRで行う）で埋め込み、caption も併記せよ。**ただし機械切り出しは外すことがある。貼る前に必ず検証せよ:**
  (a) needs_review=false の crop → そのまま埋め込んでよい。
  (b) needs_review=true の crop（reason 参照）→ **その PNG を画像として実際に開いて、caption と内容が一致するか必ず目視確認**。一致すれば埋め込む。ズレている（本文テキストを掴んでいる／図の一部しか写っていない／右や下が切れている）場合は、貼る前に本当にその clip でよいか考え直し、\`pdftoppm -png -f <page> -l <page> -r 150 ${PDF} <prefix>\` でページを起こして PIL で正しい領域に切り直し→切り直した PNG を再度画像として開いて確認、を満足するまで繰り返す。表が論文中で実体プローズ（本物の表組み画像が無い）なら、誤クロップは捨てて数値を HTML \`<table>\` に再組版せよ。
  図が実在するのに **inline SVG / canvas で論文図を描き直すことは引き続き禁止**。manifest が空（抽出0件）の論文に限り、最終手段として SVG 模式図を許可する。
 
 【セッション id／必須】header の <div class=\"meta\"> 内に、可視テキストとして '${AGENT_LABEL} session: <code>__AGENT_SESSION_ID__</code>' の1行を必ず含めよ。リテラル文字列 __AGENT_SESSION_ID__ をそのまま書くこと（worker が実セッション id に置換する）。タイトル直下に id が見えるようにするのが目的。
 
-【本文の数式デリミタ／必須】本文のブロック数式は \$\$ … \$\$、インラインは \$ … \$ で書く。\\[ … \\] や \\( … \\) は本文で使うな（自動レンダラのデリミタ登録が \$\$/\$ 前提で、\\[…\\] はリテラル表示に化けることがある）。KaTeX の renderMathInElement の delimiters には保険として \$\$・\$・\\[・\\( の4種すべてを登録すること。
+【本文の数式デリミタ／必須】本文のブロック数式は \$\$ … \$\$、インラインは \$ … \$ で書く。\\[ … \\] や \\( … \\) は本文で使うな（自動レンダラのデリミタ登録が \$\$/\$ 前提で、\\[…\\] はリテラル表示に化けることがある）。KaTeX の renderMathInElement の delimiters には保険として \$\$・\$・\\[・\\( の4種すべてを登録し、throwOnError: false も付けること。レンダラは KaTeX を既定とする。
+
+【数式中の生の < ／必須・最重要】数式の中に生の < を書くな。< の直後が英字・/・!・? だと、ブラウザの HTML トークナイザがそれを開始タグとして読み、数式どころか周囲の本文ごとタグの属性に吸い込まれて画面から消える（KaTeX が動く前に起きるので KaTeX では防げない）。例: \$c_{<t}\$ と書くと <t} が開始タグ名になり後続の文が消える。必ず \$c_{&lt;t}\$ か \$c_{\\lt t}\$ と書け。x_{<t} / c_{<t} / a_{<i} は LM 系論文の標準記法なので必ず出てくる。\$a < b\$（< の次が空白）や \$\\rho(A)<1\$（次が数字）は無害。
+
+【KaTeX 非対応の LaTeX ／必須】次は KaTeX が実装していないので使うな: \\textsc（→\\mathrm か \\text）、\\begin{psmallmatrix}（→\\left(\\begin{smallmatrix}…\\end{smallmatrix}\\right)）、\\begin{align}/\\begin{eqnarray}（→\\begin{aligned}）、\\bm（→\\boldsymbol）、\\mathds（→\\mathbb）、\\nicefrac（→\\tfrac）、\\mbox（→\\text）、\\eqref/\\label（→削除）。また本文にリテラルの \$（金額等）を書くな。\\\$ はエスケープにならない（auto-render が TeX 解釈より先に生の \$ で切る）ので「2 USD」のように書き換えること。
+
+【出荷前チェック／必須】HTML を書き終えたら必ず python3 tools/readpaper/host/check_html.py --fix <生成した html> を 1 回走らせ、findings が 0 になるまで直してから終了すること。
 
 【図・表キャプションの数式／必須】<figcaption> 内の数式は必ずインライン数式（MathJax は \\( … \\)、KaTeX は \$ … \$）で書く。\$\$ … \$\$ や \\[ … \\]（中央寄せブロック数式）をキャプション内で使ってはならない。キャプションの数式が1個ずつ中央寄せの独立行になるのを防ぐため。
 
@@ -263,13 +319,19 @@ codex exec --json \
       --dangerously-bypass-approvals-and-sandbox \
       ${READPAPER_CODEX_ARGS:-} \
       "$PROMPT" </dev/null | tee "$CODEX_JSONL"
-echo "[readpaper] codex exit=${PIPESTATUS[0]}"
+AGENT_PIPE=("${PIPESTATUS[@]}")
+echo "[readpaper] codex exit=${AGENT_PIPE[0]}"
+if [ "${AGENT_PIPE[0]}" != "0" ] || [ "${AGENT_PIPE[1]}" != "0" ]; then
+  echo "[readpaper] ERROR agent failed; private draft kept: $WORK_DIR"
+  notify "✗ $DEST: agent failed; private draft kept"
+  exit 1
+fi
 
 # Pull the session id, the token usage and the final message out of the JSONL in one
 # pass. NOTE: codex also emits {"type":"item.completed","item":{"type":"error",...}} for
 # benign plugin-hook warnings (e.g. "clamping SessionEnd hook timeout to 3s"), so error
 # events are COUNTED AND LOGGED but never treated as run failure. Success is decided the
-# same way as on the claude path: did this run produce a new html (START_EPOCH check)?
+# same way as on the claude path: zero exit, exact draft, and publication checks.
 CODEX_SUMMARY="$(python3 - "$CODEX_JSONL" <<'PYEOF'
 import json, sys
 sid, inp, cached, out, last_msg, errors = "", 0, 0, 0, "", 0
@@ -336,8 +398,21 @@ echo "[readpaper] session_id=$SID  (resume: claude --resume $SID)"
 # replay on the next `--resume`). Side note: with --output-format json the model's
 # streaming chatter no longer flows to this log, so we dump is_error + a result
 # head below for visibility.
-RUN_JSON="$(claude -p "$PROMPT" --session-id "$SID" --output-format json --dangerously-skip-permissions)"
-echo "[readpaper] claude exit=$?"
+RUN_JSON="$(claude -p "$PROMPT" --session-id "$SID" --output-format json --dangerously-skip-permissions </dev/null)"
+AGENT_EXIT=$?
+echo "[readpaper] claude exit=$AGENT_EXIT"
+if [ "$AGENT_EXIT" != "0" ]; then
+  printf '%s\n' "$RUN_JSON"
+  echo "[readpaper] ERROR agent failed; private draft kept: $WORK_DIR"
+  notify "✗ $DEST: agent failed; private draft kept"
+  exit 1
+fi
+if ! printf '%s' "$RUN_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(1 if d.get("is_error") else 0)'; then
+  printf '%s\n' "$RUN_JSON"
+  echo "[readpaper] ERROR agent reported failure; private draft kept: $WORK_DIR"
+  notify "✗ $DEST: agent reported failure; private draft kept"
+  exit 1
+fi
 printf '%s' "$RUN_JSON" | python3 -c "import json,sys
 try:
     d=json.load(sys.stdin)
@@ -373,74 +448,31 @@ fi
 
 fi  # end agent backend dispatch
 
-# Finalize the generated HTML in PYTHON, not bash. The old bash version
-# discovered the file via `ls -t html-expl/*.html | grep | head` and substituted
-# the session id with sed/awk. Under Chrome's flaky macOS-TCC attribution that
-# bash *glob* intermittently returned empty, so NEW_HTML was blank and the
-# session-id substitution + line-1 stamp + fallback inject ALL silently skipped
-# (each guarded by `[ -n "$NEW_HTML" ]`) — shipping a literal
-# `__CLAUDE_SESSION_ID__` placeholder. Python os.scandir keeps Full-Disk-Access
-# reliably here (extract_figures.py / build_index.py succeed every run), so the
-# discovery + placeholder substitution + fallback inject + line-1 stamp now all
-# happen in finalize_html.py. It prints the resolved html path (or "NONE").
-echo "[readpaper] finalizing html (session id + stamp; robust python)"
-# Resolve finalize_html.py: prefer the deployed copy next to this worker, but
-# fall back to the repo copy under PROJECT_DIR. Rationale: if install.sh was not
-# re-run after finalize_html.py was added/changed, "$HOST_DIR/finalize_html.py"
-# is absent and the placeholder ships literally (happened 2026-07-01). The worker
-# already reads/writes PROJECT_DIR reliably (extract_figures/build_index do), so
-# the repo copy is a safe fallback that keeps the session-id substitution running
-# even when the deploy dir drifts.
+# Finalize ONLY the predeclared private file. A missing output is an error;
+# another paper, a citation, or a newer file is never a substitute.
 FINALIZE="$HOST_DIR/finalize_html.py"
 [ -f "$FINALIZE" ] || FINALIZE="$PROJECT_DIR/tools/readpaper/host/finalize_html.py"
-if [ ! -f "$FINALIZE" ]; then
-  echo "[readpaper] ERROR finalize_html.py not found (deploy or repo) -> session id will not be filled"
+if ! python3 "$FINALIZE" --html "$STAGE_HTML" "$PROJECT_DIR" "$SID" "$PDF" "$TS" "$AGENT"; then
+  echo "[readpaper] ERROR finalization failed; private work kept: $WORK_DIR"
+  notify "✗ $DEST: no valid explicit output"
+  exit 1
 fi
-# START_EPOCH restricts discovery to html files created/modified by THIS run —
-# without it, a run that generated nothing (e.g. claude refused) stamped and
-# announced whichever unrelated html happened to be newest.
-# The 6th arg (agent) decides the label and the resume command written into the html —
-# `claude --resume <id>` and `codex exec resume <id>` are not interchangeable, so the
-# file has to say which CLI reopens it.
-NEW_HTML="$(python3 "$FINALIZE" "$PROJECT_DIR" "$SID" "$PDF" "$TS" "$START_EPOCH" "$AGENT")"
-echo "[readpaper] finalize_html($FINALIZE) -> ${NEW_HTML:-<none>}"
-[ "$NEW_HTML" = "NONE" ] && NEW_HTML=""
-# Last-resort guard: if a resolved html still carries a literal placeholder, fill it
-# in-place here (python, FDA-stable) so a placeholder can never ship. Both the current
-# token and the legacy one are handled — a stale prompt or house-rules file may still
-# say __CLAUDE_SESSION_ID__.
-if [ -n "$NEW_HTML" ] && [ -f "$NEW_HTML" ]; then
-  python3 - "$NEW_HTML" "$SID" <<'PYEOF'
-import sys
-p, sid = sys.argv[1], sys.argv[2]
-s = open(p, encoding="utf-8").read()
-hit = next((t for t in ("__AGENT_SESSION_ID__", "__CLAUDE_SESSION_ID__") if t in s), None)
-if hit:
-    open(p, "w", encoding="utf-8").write(s.replace(hit, sid))
-    print("[readpaper] WARN placeholder %s still present -> filled in-place" % hit)
-PYEOF
+# Mandatory structural/math/image checks operate on a frozen private copy. Assets
+# get a new per-run directory; public HTML changes only in the atomic final step.
+if ! NEW_HTML="$(python3 "$PUBLISH" publish "$WORK_DIR")"; then
+  echo "[readpaper] ERROR publication rejected; private work kept: $WORK_DIR"
+  notify "✗ $DEST: checks failed; public page unchanged"
+  exit 1
 fi
+echo "[readpaper] published -> $NEW_HTML  session=$SID"
 
-echo "[readpaper] rebuilding index"
-python3 build_index.py || echo "[readpaper] WARN build_index.py failed"
-
-# NOTE: the session id is recorded above in THIS per-job log ("session_id=...").
-# We deliberately do NOT append to a shared logs/readpaper-sessions.txt here:
-# a Chrome-spawned worker cannot modify a shared file once another app (e.g.
-# Numbers, if the .tsv is double-clicked) has tagged it via macOS App
-# Management → EPERM. The consolidated ledger is instead rebuilt on demand from
-# these per-job logs by tools/readpaper/rebuild_sessions.py (run interactively).
-if [ -n "$NEW_HTML" ] && [ -f "$NEW_HTML" ]; then
-  # Title for the notification: the finalized html's <title> (read by path in
-  # python — a known-path read survives TCC better than a bash glob).
-  TITLE="$DEST"
-  T="$(python3 -c "import re,sys; m=re.search(r'<title>([^<]*)</title>', open(sys.argv[1],encoding='utf-8').read()); print(m.group(1) if m else '')" "$NEW_HTML" 2>/dev/null)"
-  [ -n "$T" ] && TITLE="$T"
-  echo "[readpaper] done -> $NEW_HTML  session=$SID"
-  notify "✓ $TITLE"
-else
-  # Claude ran but no html newer than START_EPOCH exists — the run produced
-  # nothing. Say so instead of faking success with someone else's title.
-  echo "[readpaper] ERROR no new html produced by this run (see result head above)  session=$SID"
-  notify "✗ $DEST: no html generated (see $LOG)"
+if ! python3 build_index.py; then
+  echo "[readpaper] ERROR page published but index update failed"
+  notify "⚠ $DEST: page published; index update failed"
+  exit 1
 fi
+TITLE="$(python3 -c "import re,sys; m=re.search(r'<title>([^<]*)</title>', open(sys.argv[1],encoding='utf-8').read()); print(m.group(1) if m else '')" "$NEW_HTML" 2>/dev/null)"
+[ -n "$TITLE" ] || TITLE="$DEST"
+echo "[readpaper] done -> $NEW_HTML  session=$SID"
+notify "✓ $TITLE"
+exit 0

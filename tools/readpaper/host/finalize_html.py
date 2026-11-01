@@ -1,69 +1,17 @@
 #!/usr/bin/env python3
-"""Robustly finalize the explainer HTML the worker just generated.
+"""Stamp a worker's explicit draft, or explicitly named interactive files.
 
-WHY THIS EXISTS
----------------
-readpaper_run.sh used to discover the generated file and substitute the session
-id with a bash pipeline:
-
-    NEW_HTML="$(ls -t html-expl/*.html | grep -v /index.html | head -1)"
-    sed -i '' "s/__CLAUDE_SESSION_ID__/$SID/g" "$NEW_HTML"   # + awk inject + stamp
-
-Under Chrome's flaky macOS-TCC attribution the *bash glob* `html-expl/*.html`
-intermittently returns nothing, so NEW_HTML was empty and EVERY post-step
-(`[ -n "$NEW_HTML" ]`) silently skipped — shipping a literal
-`__CLAUDE_SESSION_ID__` placeholder and no line-1 stamp. Python file IO keeps
-Full-Disk-Access reliably in the worker (extract_figures.py / build_index.py
-succeed every run), so we do the discovery + edits here instead.
-
-WHAT IT DOES
-------------
-1. Find the newest non-index *.html in html-expl/ via os.scandir (reliable FDA),
-   restricted to files modified at/after <start_epoch> — i.e. produced by THIS
-   run. Without that restriction, a run that generated nothing (e.g. claude
-   declined a duplicate) stamped and reported whichever unrelated html happened
-   to be newest (observed 2026-07-17..21).
-2. Replace the literal placeholder __AGENT_SESSION_ID__ (or the legacy
-   __CLAUDE_SESSION_ID__, still emitted by older prompts and present in ~100
-   already-generated files) with the real SID.
-3. If the visible session line is absent entirely, inject a <div class="meta">
-   right after the first </h1> as a fallback.
-4. Stamp a `<!-- <agent> session_id: ... -->` comment on line 1 (idempotent).
-
-USAGE
------
-    finalize_html.py <project_dir> <sid> <pdf> <timestamp> [start_epoch] [agent]
-Prints the resolved html path (or "NONE") so the worker can log / notify.
-start_epoch (unix seconds) is optional for backward compatibility; when absent,
-any html qualifies (old behavior). <agent> is "claude" (default) or "codex" and
-only selects the label and the resume command written into the file — the two
-CLIs resume differently (`claude --resume <id>` vs `codex exec resume <id>`), so
-a reader who opens the html months later needs to be told which one to run.
+Workers MUST pass --html. No file discovery by mtime, citations, or asset paths
+is performed. Session provenance is written to a private draft before the common
+publisher validates and installs it. --stamp and --hook retain their explicit
+interactive file contracts.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
-
-
-def newest_explainer(html_dir: str, min_mtime: float = 0.0) -> str | None:
-    best, best_mtime = None, -1.0
-    try:
-        for e in os.scandir(html_dir):
-            if not e.is_file() or not e.name.endswith(".html"):
-                continue
-            if e.name == "index.html":
-                continue
-            m = e.stat().st_mtime
-            if m < min_mtime:
-                continue
-            if m > best_mtime:
-                best, best_mtime = e.path, m
-    except OSError as exc:
-        print(f"finalize_html: scandir failed: {exc}", file=sys.stderr)
-        return None
-    return best
 
 
 # Label written into the html, and the command that reopens the session, per backend.
@@ -82,56 +30,162 @@ PLACEHOLDERS = ("__AGENT_SESSION_ID__", "__CLAUDE_SESSION_ID__")
 # Matches the visible line and the line-1 stamp for ANY backend label, so a second
 # finalize pass never double-injects just because the label changed.
 VISIBLE_RE = re.compile(r"(?:claude-code|codex|agent) session:")
-STAMP_RE = re.compile(r"(?:claude-code|codex|agent) session_id:")
+VISIBLE_ID_RE = re.compile(r"((?:claude-code|codex|agent) session:\s*<code>)([^<]*)(</code>)")
+STAMP_RE = re.compile(r"(?:claude-code|codex|agent) session_id:\s*(\S+)")
+# The whole leading stamp comment, which spans two lines (id/source/generated, resume).
+LEADING_STAMP_RE = re.compile(
+    r"\A<!--\s*(?:claude-code|codex|agent) session_id:.*?-->\n", re.S)
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
-def main() -> int:
-    if len(sys.argv) not in (5, 6, 7):
-        print("usage: finalize_html.py <project_dir> <sid> <pdf> <ts> [start_epoch] [agent]",
-              file=sys.stderr)
-        return 2
-    project_dir, sid, pdf, ts = sys.argv[1:5]
-    # Small slack (-5s) tolerates clock/second truncation between the worker's
-    # `date +%s` and the html file's mtime.
-    min_mtime = float(sys.argv[5]) - 5.0 if len(sys.argv) >= 6 else 0.0
-    agent = sys.argv[6] if len(sys.argv) == 7 else "claude"
-    label, resume_fmt = AGENTS.get(agent, AGENTS["claude"])
-    resume_cmd = resume_fmt.format(sid=sid)
-    html_dir = os.path.join(project_dir, "html-expl")
-    path = newest_explainer(html_dir, min_mtime)
-    if not path:
-        print("NONE")
-        return 0
+def log(msg: str) -> None:
+    print(f"finalize_html: {msg}", file=sys.stderr)
 
-    with open(path, encoding="utf-8") as fh:
-        src = fh.read()
 
-    # 2. placeholder -> real id
+def read(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def stamp(path: str, sid: str, label: str, resume_cmd: str, pdf: str, ts: str,
+          project_dir: str, authoritative: bool) -> None:
+    """Put `sid` into the file: placeholder, then correction, then injection, then line 1."""
+    src = read(path)
+
     hit = next((p for p in PLACEHOLDERS if p in src), None)
     if hit:
         src = src.replace(hit, sid)
-        print(f"finalize_html: filled placeholder {hit} in {path}", file=sys.stderr)
-    elif VISIBLE_RE.search(src):
-        print(f"finalize_html: visible id already present in {path}", file=sys.stderr)
+        log(f"filled placeholder {hit} in {path}")
     else:
-        # 3. fallback: inject a visible meta line after the first </h1>
-        inj = f'\n  <div class="meta">{label} session: <code>{sid}</code></div>'
-        src, n = re.subn(r"</h1>", "</h1>" + inj, src, count=1)
-        if n:
-            print(f"finalize_html: injected fallback id after </h1> in {path}", file=sys.stderr)
+        m = VISIBLE_ID_RE.search(src)
+        if m and m.group(2).strip() == sid:
+            log(f"visible id already correct in {path}")
+        elif m and authoritative:
+            # The agent invented an id instead of writing the placeholder (observed
+            # 2026-08-16: it wrote a *different, concurrent* session's uuid). Ours is
+            # pre-minted by the worker and is the one `claude --resume` accepts.
+            log(f"WARN replacing foreign visible id {m.group(2).strip()!r} with {sid} "
+                f"in {path}")
+            src = VISIBLE_ID_RE.sub(lambda x: f"{label} session: <code>{sid}</code>", src, count=1)
+        elif m:
+            log(f"visible id {m.group(2).strip()!r} present and correction not authorized; "
+                f"leaving it alone")
+        elif VISIBLE_RE.search(src):
+            log(f"session line present but no <code> id in {path}; leaving it alone")
         else:
-            print(f"finalize_html: WARN no </h1> to inject after in {path}", file=sys.stderr)
+            inj = f'\n  <div class="meta">{label} session: <code>{sid}</code></div>'
+            src, n = re.subn(r"</h1>", "</h1>" + inj, src, count=1)
+            log(f"injected fallback id after </h1> in {path}" if n
+                else f"WARN no </h1> to inject after in {path}")
 
-    # 4. line-1 stamp (idempotent)
-    first_line = src.split("\n", 1)[0]
-    if not STAMP_RE.search(first_line):
-        stamp = (f"<!-- {label} session_id: {sid}  source: {pdf}  generated: {ts}\n"
+    new_stamp = (f"<!-- {label} session_id: {sid}  source: {pdf}  generated: {ts}\n"
                  f"     resume: cd {project_dir} && {resume_cmd} -->\n")
-        src = stamp + src
+    old = LEADING_STAMP_RE.match(src)
+    if not old:
+        src = new_stamp + src
+    elif authoritative and STAMP_RE.search(old.group(0)).group(1) != sid:
+        # The caller explicitly owns this file and supplies its provenance.
+        log(f"WARN correcting line-1 stamp {STAMP_RE.search(old.group(0)).group(1)} "
+            f"-> {sid} in {path}")
+        src = new_stamp + src[old.end():]
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(src)
 
+
+# --------------------------------------------------------------------------- modes
+
+def run_hook(argv) -> int:
+    """Stop-hook mode: fill the placeholder in THIS session's files with its real id.
+
+    argv is `<project_dir> <file> [<file> ...]` — the explicit list of explainers the
+    session wrote, collected by the PostToolUse hook. There is deliberately NO
+    directory scan: a headless worker's in-flight output also sits in html-expl/ with
+    the placeholder still in it (the worker substitutes only after its agent exits),
+    so "every file with a placeholder" is not "this session's files". Scanning stamped
+    four of the worker's explainers with an interactive session's id during testing on
+    2026-08-16.
+
+    Two further interlocks: the file must be under <project_dir>/html-expl/, and it
+    must still contain the literal placeholder.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except Exception as exc:                       # noqa: BLE001 - hook must never crash
+        log(f"hook: unreadable stdin ({exc})")
+        return 0
+    sid = str(payload.get("session_id") or "").strip()
+    if not UUID_RE.match(sid):
+        log(f"hook: no usable session_id in payload ({sid!r})")
+        return 0
+    if not argv:
+        return 0
+    # An explicit project dir wins over the payload's cwd: the session may be sitting
+    # in a subdirectory, and html-expl/ only exists at the repo root.
+    project_dir = os.path.abspath(argv[0] or payload.get("cwd") or os.getcwd())
+    html_dir = os.path.join(project_dir, "html-expl")
+
+    label, resume_fmt = AGENTS["claude"]
+    n = 0
+    for raw in argv[1:]:
+        path = os.path.abspath(raw)
+        if os.path.dirname(path) != html_dir or not os.path.isfile(path):
+            continue
+        if not any(p in read(path) for p in PLACEHOLDERS):
+            continue
+        stamp(path, sid, label, resume_fmt.format(sid=sid), "(interactive)",
+              "(interactive)", project_dir, authoritative=True)
+        print(path)
+        n += 1
+    if n:
+        log(f"hook: filled the session-id placeholder in {n} file(s) with {sid}")
+    return 0
+
+
+def run_stamp(argv) -> int:
+    """Manual mode: finalize_html.py --stamp <html> <sid> [agent]."""
+    if len(argv) < 2:
+        log("usage: finalize_html.py --stamp <html> <sid> [agent]")
+        return 2
+    path, sid = argv[0], argv[1]
+    agent = argv[2] if len(argv) > 2 else "claude"
+    label, resume_fmt = AGENTS.get(agent, AGENTS["claude"])
+    if not os.path.isfile(path):
+        log(f"no such file: {path}")
+        return 2
+    stamp(path, sid, label, resume_fmt.format(sid=sid), "(manual)", "(manual)",
+          os.path.dirname(os.path.abspath(path)), authoritative=True)
+    print(path)
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--hook":
+        return run_hook(argv[1:])
+    if argv and argv[0] == "--stamp":
+        return run_stamp(argv[1:])
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--html", required=True, help="exact private HTML draft")
+    parser.add_argument("project_dir")
+    parser.add_argument("sid")
+    parser.add_argument("pdf")
+    parser.add_argument("ts")
+    parser.add_argument("agent", choices=AGENTS, default="claude", nargs="?")
+    args = parser.parse_args(argv)
+    if not UUID_RE.fullmatch(args.sid):
+        log("no valid session id; refusing to finalize")
+        return 1
+    path = os.path.abspath(args.html)
+    if not os.path.isfile(path) or os.path.islink(path):
+        log(f"explicit output missing or symlink: {path}")
+        return 1
+    label, resume_fmt = AGENTS[args.agent]
+    stamp(path, args.sid, label, resume_fmt.format(sid=args.sid), args.pdf,
+          args.ts, args.project_dir, authoritative=True)
     print(path)
     return 0
 

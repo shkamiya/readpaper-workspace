@@ -8,6 +8,8 @@
 #                                     for the given urls, or for a default battery
 #                                     covering arXiv / OpenReview / PMLR / JMLR /
 #                                     ACL / NeurIPS / raw .pdf
+#   test_host.sh --dupe-guard         run readpaper_run.sh's duplicate-guard snippet
+#                                     against synthetic html-expl/ fixtures
 #
 # Without --run, readpaper_run.sh is stubbed out (we only check URL resolution
 # and the "started"/"error" reply). With --run, the real job executes.
@@ -48,7 +50,64 @@ PY
   exit $?
 fi
 
-URL="${1:?usage: test_host.sh <url> [--run]  |  test_host.sh --resolve-only [url...]}"
+if [ "${1:-}" = "--dupe-guard" ]; then
+  # The guard decides whether a click is a re-read of a paper already explained.
+  # It is easy to make it too eager: every explainer cites a dozen OTHER papers as
+  # "arxiv.org/abs/<id>" in its 先行研究 / Q&A sections, and a substring match on
+  # that shape answered "already exists" for papers never read (2026-08-17).
+  # This runs the real snippet, lifted out of readpaper_run.sh, over fixtures.
+  python3 - "$ROOT/host/readpaper_run.sh" <<'PY'
+import os, re, subprocess, sys, tempfile
+
+src = open(sys.argv[1], encoding="utf-8").read()
+snippet = src.split("EXISTING=\"$(python3 - \"$DEST\" <<'PYEOF'\n", 1)[1].split("\nPYEOF", 1)[0]
+
+FIXTURES = {
+    # name: (html, [dests it MUST match], [dests it MUST NOT match])
+    "cites-others.html": (
+        '<body><header><h1>T</h1><div class="meta">arXiv:2509.99999</div></header>'
+        '<h2>先行研究</h2><a href="https://arxiv.org/abs/2306.11167">Red Herrings</a>'
+        '<li>arXiv:2509.23808 Semantic-Space Exploration</li>',
+        ["2509.99999"], ["2306.11167", "2509.23808"]),
+    "modern-with-figs.html": (
+        '<!-- source: papers/2604.05655.pdf  generated: 20260817 -->\n<body>'
+        '<img src="figs/2604.05655/fig1.png">',
+        ["2604.05655", "2604.05655v2"], ["2604.0565"]),
+    "legacy-header-only.html": (
+        '<body><header class="wall"><p class="kicker">NeurIPS 2024 / arXiv:2402.07754</p>'
+        '<h1>DoT</h1></header><h2>1. 導入</h2><a href="https://arxiv.org/abs/2410.03020">x</a>',
+        ["2402.07754", "2402.07754v3"], ["2410.03020"]),
+}
+
+tmp = tempfile.mkdtemp()
+os.mkdir(os.path.join(tmp, "html-expl"))
+for name, (html, _, _) in FIXTURES.items():
+    open(os.path.join(tmp, "html-expl", name), "w", encoding="utf-8").write(html)
+
+def guard(dest):
+    r = subprocess.run([sys.executable, "-c", snippet, dest],
+                       capture_output=True, text=True, cwd=tmp)
+    return os.path.basename(r.stdout.strip())
+
+fails = 0
+for name, (_, want, reject) in FIXTURES.items():
+    for d in want:
+        got = guard(d)
+        ok = got == name
+        fails += not ok
+        print(f"{'OK  ' if ok else 'FAIL'} {d!r:22} -> {got or '(none)'}  (want {name})")
+    for d in reject:
+        got = guard(d)
+        ok = got != name
+        fails += not ok
+        print(f"{'OK  ' if ok else 'FAIL'} {d!r:22} -> {got or '(none)'}  (must not be {name})")
+print("FAILURES:", fails)
+sys.exit(1 if fails else 0)
+PY
+  exit $?
+fi
+
+URL="${1:?usage: test_host.sh <url> [--run]  |  test_host.sh --resolve-only [url...]  |  test_host.sh --dupe-guard}"
 
 python3 - "$HOST" "$URL" "${2:-}" <<'PY'
 import json, struct, subprocess, sys, os, tempfile

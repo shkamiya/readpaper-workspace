@@ -37,6 +37,12 @@ cp "$SRC_HOST/readpaper_run.sh"  "$DEPLOY/readpaper_run.sh"
 # — when this cp was missing the deployed worker hit "No such file or directory"
 # and every run silently shipped a literal __CLAUDE_SESSION_ID__ (2026-07-01).
 cp "$SRC_HOST/finalize_html.py"  "$DEPLOY/finalize_html.py"
+# Math checker: the worker calls it as "$HOST_DIR/check_html.py" right after finalize.
+# Same deploy-or-it-silently-degrades hazard as finalize_html.py above — without it the
+# worker logs "check_html.py not found" and announces "✓" on a page whose formulas may
+# not render.
+cp "$SRC_HOST/check_html.py"     "$DEPLOY/check_html.py"
+cp "$SRC_HOST/publish_html.py"   "$DEPLOY/publish_html.py"
 # Figure extractor: the worker calls it as "$HOST_DIR/extract_figures.py", so it
 # must sit next to the deployed worker. It runs the poppler/PIL crop pipeline in
 # the worker's (FDA-stable) context before Claude starts.
@@ -85,12 +91,15 @@ BAKED_PATH="$(dirname "$PY_BIN"):$(dirname "$AGENT_BIN"):$BREW_PREFIX/bin:/usr/l
 
 # The worker sources this to learn which backend to drive. Kept as a separate file (not
 # baked) so the backend can be switched without re-running install.sh.
+# Preserve the server's ASK_TOKEN and user overrides when deploying updates.
+if [ ! -f "$DEPLOY/config.env" ]; then
 cat > "$DEPLOY/config.env" <<EOF
 # Written by tools/readpaper/install.sh on $(date +%Y-%m-%d).
 # Which agent CLI writes the explainer: claude | codex
 # The environment variable READPAPER_AGENT overrides this.
 READPAPER_AGENT=$AGENT_NAME
 EOF
+fi
 
 # Warn about the runtime dependencies the worker cannot supply for itself. These are
 # checked but NOT fatal: the host/extension wiring is still worth installing, and the

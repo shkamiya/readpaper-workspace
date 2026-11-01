@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ja">
+<!-- Served by ask_server.py at GET /go. Placeholders __ORIGIN__ / __TOKEN__ / __URL__
+     are filled per request (HTML-escaped). Never served from html-expl/: the token
+     and the bookmarklet's host are request-specific. -->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>論文を読む (DP)</title>
+<link rel="apple-touch-icon" href="/icons/icon-helv.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: max(env(safe-area-inset-top), 16px) 16px 48px;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    background: #0f1115; color: #e6e8ee; line-height: 1.6;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  h2 { font-size: 1.02rem; margin: 26px 0 8px; color: #c9cfdc; }
+  a { color: #6f9bff; }
+  .sub { color: #8b93a7; font-size: .85rem; }
+  .card {
+    background: #181b22; border: 1px solid #262b36; border-radius: 14px;
+    padding: 16px 18px; margin: 12px 0;
+  }
+  .url { word-break: break-all; font-size: .9rem; color: #a5adc0; margin: 0 0 12px; }
+  .btn {
+    display: block; width: 100%; font: inherit; font-size: 1.05rem; font-weight: 600;
+    padding: 14px; border: 0; border-radius: 12px; cursor: pointer;
+    background: #2f6bff; color: #fff; -webkit-tap-highlight-color: transparent;
+  }
+  .btn:disabled { background: #2a3244; color: #8b93a7; cursor: default; }
+  .btn.sec { background: #232936; color: #e6e8ee; }
+  .row { display: flex; gap: 8px; }
+  .row input {
+    flex: 1; min-width: 0; font: inherit; padding: 12px 14px; border-radius: 12px;
+    border: 1px solid #2c3240; background: #0f1115; color: #e6e8ee;
+  }
+  .row .btn { width: auto; padding: 12px 18px; }
+  .status { margin-top: 12px; font-size: .95rem; min-height: 1.4em; white-space: pre-wrap; }
+  .status.ok { color: #4fd08a; }
+  .status.err { color: #ff7b7b; }
+  .status.busy { color: #f0b84a; }
+  .phase { font-family: ui-monospace, Menlo, monospace; font-size: .78rem; color: #8b93a7;
+           margin-top: 6px; word-break: break-all; }
+  code, pre { font-family: ui-monospace, Menlo, monospace; font-size: .82rem; }
+  pre {
+    background: #0f1115; border: 1px solid #2c3240; border-radius: 10px;
+    padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; margin: 8px 0;
+  }
+  ol { padding-left: 1.3em; } li { margin: 4px 0; }
+  details { margin-top: 20px; }
+  summary { cursor: pointer; color: #c9cfdc; font-weight: 600; }
+  .note { border-left: 3px solid #f0b84a; padding: 6px 12px; color: #c9cfdc; font-size: .9rem; margin: 10px 0; }
+  .copy { font: inherit; font-size: .8rem; padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3240;
+          background: #232936; color: #e6e8ee; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>論文を読む (DP)</h1>
+    <a class="sub" href="/">← 一覧へ</a>
+  </header>
+
+  <section class="card" id="launch" hidden>
+    <p class="url" id="target"></p>
+    <button class="btn" id="run">この論文を読む</button>
+    <div class="status" id="st"></div>
+    <div class="phase" id="phase"></div>
+    <p class="sub" style="margin:12px 0 0">Mac 側で PDF 取得 → 図表切り出し → agent 生成が走る（10〜20 分）。
+    このページは閉じてよい。完成すると <a href="/">一覧</a> の先頭に出る。</p>
+  </section>
+
+  <section class="card" id="paste">
+    <p class="sub" style="margin:0 0 8px">URL を貼って読む（arXiv abs/pdf、OpenReview、PMLR、JMLR、ACL、NeurIPS、*.pdf）</p>
+    <form class="row" id="pasteForm">
+      <input type="url" id="pasteUrl" placeholder="https://arxiv.org/abs/…" autocomplete="off" inputmode="url">
+      <button class="btn" type="submit">読む</button>
+    </form>
+  </section>
+
+  <details id="setup">
+    <summary>iPad / iPhone のブラウザからポチッと起動する設定</summary>
+
+    <h2>1. ブックマークレット（Chrome / Safari 共通・いちばん手軽）</h2>
+    <p class="sub">論文ページで下のブックマークを開くと、このページに URL を持って飛んでくる。あとは「この論文を読む」を 1 タップ。</p>
+    <pre id="bml">javascript:(function(){location.href="__ORIGIN__/go?url="+encodeURIComponent(location.href)})()</pre>
+    <button class="copy" id="copyBml">コードをコピー</button>
+    <ol>
+      <li>任意のページをブックマークに追加（名前は「DPで読む」等）。</li>
+      <li>ブックマークを編集し、URL 欄を上のコードに置き換える。</li>
+      <li>論文ページを開いた状態でそのブックマークを開く。<br>
+          <span class="sub">Chrome for iPad でブックマーク一覧からの実行が効かない場合は、アドレスバーにブックマーク名を打って候補から選ぶと実行される。</span></li>
+    </ol>
+
+    <h2>2. 共有シート（iOS ショートカット・完全 1 タップ）</h2>
+    <p class="sub">ショートカット app で「共有シートに表示」する 1 本を作る。Safari / Chrome の「共有」→「DPで読む」で即起動、結果が通知で出る。</p>
+    <ol>
+      <li>ショートカット app → 「＋」→ 名前「DPで読む」。</li>
+      <li>右上の情報アイコン → 「共有シートに表示」を ON、「受け取る種類」を <b>URL</b> だけにする。</li>
+      <li>アクション「URL の内容を取得」を追加:
+        <ul>
+          <li>URL: <code>__ORIGIN__/api/readpaper</code></li>
+          <li>方法: <b>POST</b>、本文: <b>JSON</b></li>
+          <li>フィールド <code>url</code> = 「ショートカットの入力」、フィールド <code>token</code> = 下のトークン</li>
+        </ul>
+      </li>
+      <li>アクション「通知を表示」を追加し、本文に「URL の内容」を入れる。</li>
+    </ol>
+    <pre id="tok">__TOKEN__</pre>
+    <button class="copy" id="copyTok">トークンをコピー</button>
+    <p class="sub">トークンは Mac の <code>~/Library/Application Support/readpaper/config.env</code> の <code>ASK_TOKEN</code>。
+    変えたらショートカット側も更新する。</p>
+
+    <h2>3. 知っておくこと</h2>
+    <div class="note">iPad からは <b>URL だけ</b>が Mac に届く。Mac の Chrome 拡張と違ってブラウザの cookie で PDF を取れないので、
+      ログインや bot 壁（OpenReview の Turnstile 等）の向こうにある PDF は落とせず、Mac 側で「download failed」になる。
+      arXiv / PMLR / JMLR / ACL / NeurIPS など素で取れる会場は問題ない。</div>
+    <div class="note">同じ論文の解説が既にある場合は生成せず、その解説へのリンクを返す（Mac の重複ガードと同じ判定）。</div>
+    <div class="note">Tailscale が ON で、Mac が起きていること。この URL（<code>__ORIGIN__</code>）は Tailnet の中からしか届かない。</div>
+  </details>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var TOKEN = "__TOKEN__";
+  var URL0 = "__URL__";
+  var $ = function (id) { return document.getElementById(id); };
+  var st = $("st"), phase = $("phase"), run = $("run");
+  var pollTimer = null;
+
+  function setStatus(msg, cls) { st.textContent = msg; st.className = "status " + (cls || ""); }
+  function link(file, title) {
+    st.innerHTML = "";
+    var a = document.createElement("a");
+    a.href = "/" + encodeURIComponent(file);
+    a.textContent = title || file;
+    st.appendChild(document.createTextNode("✓ 解説あり: "));
+    st.appendChild(a);
+    st.className = "status ok";
+  }
+
+  function poll(id) {
+    fetch("/api/readpaper/status?id=" + encodeURIComponent(id), { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.exists) {
+          clearInterval(pollTimer); pollTimer = null;
+          link(d.file, d.title);
+          phase.textContent = "";
+          return;
+        }
+        if (d.failed) {
+          clearInterval(pollTimer); pollTimer = null;
+          setStatus("✗ Mac 側で失敗。ログ: logs/" + d.log, "err");
+          run.disabled = false;
+        }
+        phase.textContent = d.phase || "";
+      })
+      .catch(function () {});
+  }
+
+  function start(url) {
+    if (!url) return;
+    run.disabled = true;
+    setStatus("解決中… (Mac が URL から PDF を探している)", "busy");
+    phase.textContent = "";
+    fetch("/api/readpaper", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url, token: TOKEN })
+    })
+      .then(function (r) { return r.json().then(function (d) { d._http = r.status; return d; }); })
+      .then(function (d) {
+        if (d.status === "exists") { link(d.file, d.title); return; }
+        if (d.status === "started") {
+          setStatus("▶ 開始: " + d.id + "  (" + d.how + ")", "ok");
+          if (pollTimer) clearInterval(pollTimer);
+          pollTimer = setInterval(function () { poll(d.id); }, 15000);
+          poll(d.id);
+          return;
+        }
+        setStatus("✗ " + (d.error || ("HTTP " + d._http)), "err");
+        run.disabled = false;
+      })
+      .catch(function (e) {
+        setStatus("✗ 通信失敗: " + e.message + "  (Tailscale は ON か？ Mac は起きているか？)", "err");
+        run.disabled = false;
+      });
+  }
+
+  if (URL0) {
+    $("launch").hidden = false;
+    $("target").textContent = URL0;
+    $("paste").hidden = true;
+    run.addEventListener("click", function () { start(URL0); });
+  } else {
+    $("setup").open = true;
+  }
+
+  $("pasteForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var u = $("pasteUrl").value.trim();
+    if (!u) return;
+    // Re-enter through /go?url= so the launch card (status, polling) is the one UI.
+    location.href = "/go?url=" + encodeURIComponent(u);
+  });
+
+  function copier(btnId, srcId) {
+    $(btnId).addEventListener("click", function () {
+      var text = $(srcId).textContent;
+      var done = function () { $(btnId).textContent = "コピーした"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+      } else { fallback(text); done(); }
+    });
+  }
+  function fallback(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+  copier("copyBml", "bml");
+  copier("copyTok", "tok");
+})();
+</script>
+</body>
+</html>
